@@ -1,0 +1,501 @@
+---
+title: "Goodreads Book Rating Prediction - Data Prep & Modeling (NO SCRAPING)"
+author: "Stella Dey"
+date: "December 2025"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Goodreads Book Rating Analysis
+
+This notebook performs data preparation and linear regression modeling for predicting book ratings using the Goodreads 100k dataset.
+
+---
+
+```{r load-packages}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(car)
+library(MASS)
+```
+
+---
+
+```{r load-data}
+# read the data
+
+bks <- read.csv("goodreads_data.csv", stringsAsFactors = FALSE)
+
+cat("loaded", nrow(bks), "books\n\n")
+
+if(!require(jsonlite)) {
+  install.packages("jsonlite")
+  library(jsonlite)
+}
+
+# function to get year from isbn
+getyear <- function(isbn) {
+  if(is.na(isbn) || isbn == "") {
+    return(NA)
+  }
+
+  url <- paste0("https://openlibrary.org/api/books?bibkeys=ISBN:", isbn, "&format=json&jscmd=data")
+
+  tryCatch({
+    resp <- jsonlite::fromJSON(url)
+    k <- paste0("ISBN:", isbn)
+
+    if(length(resp) > 0 && !is.null(resp[[k]]$publish_date)) {
+      yrstr <- resp[[k]]$publish_date
+      yr <- as.numeric(str_extract(yrstr, "\\d{4}"))
+      return(yr)
+    }
+    return(NA)
+  }, error = function(e) {
+    return(NA)
+  })
+}
+
+
+# grab first 1000 books with isbn
+bks2scrape <- bks %>%
+  filter(!is.na(isbn) & isbn != "") %>%
+  head(1000)
+
+cat("scraping", nrow(bks2scrape), "books\n")
+
+pubyears <- c()
+t1 <- Sys.time()
+
+for(i in 1:nrow(bks2scrape)) {
+  y <- getyear(bks2scrape$isbn[i])
+  pubyears <- c(pubyears, y)
+  
+  if(i %% 100 == 0) {
+    elapsed <- round(difftime(Sys.time(), t1, units = "mins"), 1)
+    cat("  scraped", i, "books (", elapsed, "min)\n")
+  }
+  
+  #Sys.sleep(0.1)
+}
+
+bks2scrape$publication_year <- pubyears
+
+# add years back to main dataset
+bks$publication_year <- NA
+bks$publication_year[match(bks2scrape$isbn, bks$isbn)] <- bks2scrape$publication_year
+
+totaltime <- round(difftime(Sys.time(), t1, units = "mins"), 1)
+cat("\nscraping done (", totaltime, "min)\n")
+cat("got years for:", sum(!is.na(bks$publication_year)), "\n")
+cat("success rate:", round(100 * sum(!is.na(bks$publication_year)) / 1000, 1), "%\n")
+
+if(sum(!is.na(bks$publication_year)) > 0) {
+  cat("year range:", min(bks$publication_year, na.rm=TRUE), "-", 
+      max(bks$publication_year, na.rm=TRUE), "\n")
+}
+
+cat("\ncolumns:\n")
+print(names(bks))
+```
+
+---
+
+```{r explore-data}
+# check out the data
+summary(bks[, c("rating", "totalratings", "pages", "reviews")])
+
+cat("\nfirst 10 genres:\n")
+head(bks$genre, 10)
+
+cat("\nempty genres:", sum(bks$genre == "" | is.na(bks$genre)), "\n")
+cat("unique combos:", length(unique(bks$genre)), "\n")
+```
+
+---
+
+```{r clean-genres}
+# simplify genres into categories
+getgenre <- function(g) {
+  if (is.na(g) || g == "") {
+    return(NA)
+  }
+  
+  firstg <- str_trim(strsplit(g, ",")[[1]][1])
+  firstg <- tolower(firstg)
+  
+  if (grepl("fiction|novel", firstg) && !grepl("non-fiction|nonfiction", firstg)) {
+    return("Fiction")
+  } else if (grepl("fantasy|magic|paranormal|supernatural", firstg)) {
+    return("Fantasy")
+  } else if (grepl("mystery|thriller|suspense|crime|detective", firstg)) {
+    return("Mystery/Thriller")
+  } else if (grepl("romance|love", firstg)) {
+    return("Romance")
+  } else if (grepl("history|historical", firstg)) {
+    return("History")
+  } else if (grepl("biography|memoir|autobiography", firstg)) {
+    return("Biography")
+  } else if (grepl("science fiction|sci-fi|scifi", firstg)) {
+    return("Science Fiction")
+  } else if (grepl("non-fiction|nonfiction", firstg)) {
+    return("Non-Fiction")
+  } else if (grepl("children|childrens|juvenile|young adult", firstg)) {
+    return("Children/YA")
+  } else {
+    return("Other")
+  }
+}
+
+bks$genre_clean <- sapply(bks$genre, getgenre)
+
+print(table(bks$genre_clean, useNA = "ifany"))
+
+# make fiction dummy var
+bks$fiction <- ifelse(
+  bks$genre_clean %in% c("Fiction", "Fantasy", "Mystery/Thriller", 
+                                   "Romance", "Science Fiction", "Children/YA"),
+  1, 0
+)
+
+cat("\nfiction vs nonfiction:\n")
+print(table(bks$fiction, useNA = "ifany"))
+```
+
+---
+
+```{r clean-data}
+# rename cols and select what we need
+bksclean <- bks %>%
+  rename(
+    average_rating = rating,
+    ratings_count = totalratings,
+    text_reviews_count = reviews,
+    num_pages = pages,
+    genre_category = genre_clean
+  ) %>%
+  dplyr::select(
+    title,
+    author,
+    average_rating,
+    ratings_count,
+    text_reviews_count,
+    num_pages,
+    publication_year,
+    genre_category,
+    fiction
+  )
+
+cat("\nmissing before:\n")
+print(colSums(is.na(bksclean)))
+
+# remove rows with missing stuff
+bksclean <- bksclean %>%
+  filter(
+    !is.na(average_rating),
+    !is.na(num_pages),
+    !is.na(ratings_count),
+    !is.na(text_reviews_count),
+    !is.na(genre_category)
+  )
+
+# filter out wierd outliers
+bksclean <- bksclean %>%
+  filter(
+    num_pages > 50,
+    num_pages < 2000,
+    ratings_count > 10,
+    average_rating >= 1,
+    average_rating <= 5
+  )
+
+if(sum(!is.na(bksclean$publication_year)) > 100) {
+  bksclean <- bksclean %>%
+    filter(is.na(publication_year) | (publication_year > 1800 & publication_year <= 2025))
+}
+
+cat("\nbooks after clean:", nrow(bksclean), "\n")
+cat("books w year:", sum(!is.na(bksclean$publication_year)), "\n")
+```
+
+---
+
+```{r create-transformations}
+# make transformed vars for modeling
+bksmodel <- bksclean %>%
+  mutate(
+    pages_squared = num_pages^2,
+    log_ratings_count = log(ratings_count + 1),
+    log_text_reviews = log(text_reviews_count + 1)
+  )
+
+summary(bksmodel[, c("num_pages", "pages_squared", "log_ratings_count", "log_text_reviews")])
+
+cat("\ngenres:\n")
+print(table(bksmodel$genre_category))
+
+cat("\nfiction:\n")
+print(table(bksmodel$fiction, useNA = "ifany"))
+```
+
+---
+
+```{r eda-distributions, fig.width=10, fig.height=6}
+# plot rating distribution
+ggplot(bksmodel, aes(x = average_rating)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Average Book Ratings",
+       x = "Average Rating", y = "Count") +
+  theme_minimal()
+
+cat("mean:", round(mean(bksmodel$average_rating), 2), "\n")
+cat("median:", round(median(bksmodel$average_rating), 2), "\n")
+cat("sd:", round(sd(bksmodel$average_rating), 2), "\n")
+```
+
+---
+
+```{r eda-genre, fig.width=10, fig.height=6}
+# ratings by genre boxplot
+ggplot(bksmodel, aes(x = genre_category, y = average_rating, fill = genre_category)) +
+  geom_boxplot() +
+  labs(title = "Book Ratings by Genre",
+       x = "Genre", y = "Average Rating") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+bksmodel %>%
+  group_by(genre_category) %>%
+  summarise(
+    n = n(),
+    mean_rating = round(mean(average_rating), 2),
+    sd_rating = round(sd(average_rating), 2)
+  ) %>%
+  arrange(desc(mean_rating)) %>%
+  print()
+```
+
+---
+
+```{r eda-pages, fig.width=10, fig.height=6}
+# pages vs rating scatterplot
+ggplot(bksmodel, aes(x = num_pages, y = average_rating)) +
+  geom_point(alpha = 0.3, color = "steelblue", size = 1) +
+  geom_smooth(method = "lm", formula = y ~ x + I(x^2), color = "red", se = TRUE) +
+  labs(title = "Relationship between Page Count and Rating (Quadratic Fit)",
+       x = "Number of Pages", y = "Average Rating") +
+  theme_minimal()
+
+cat("cor pages rating:", 
+    round(cor(bksmodel$num_pages, bksmodel$average_rating), 3), "\n")
+```
+```{r eda-year, fig.width=10, fig.height=6}
+# year vs rating if we have it
+if("publication_year" %in% names(bksmodel) && sum(!is.na(bksmodel$publication_year)) > 0) {
+  ggplot(bksmodel %>% filter(!is.na(publication_year)), aes(x = publication_year, y = average_rating)) +
+    geom_point(alpha = 0.2, color = "steelblue") +
+    geom_smooth(method = "lm", color = "red", se = TRUE) +
+    labs(title = "Publication Year vs Average Rating",
+         x = "Publication Year", y = "Average Rating") +
+    theme_minimal()
+  
+  cat("cor year rating:", 
+      round(cor(bksmodel$publication_year, bksmodel$average_rating, use = "complete.obs"), 3), "\n")
+} else {
+  cat("no year skip\n")
+}
+```
+
+---
+
+```{r correlation-matrix, fig.width=10, fig.height=8}
+# correlation matrix for numeric vars
+corvars <- bksmodel %>%
+  dplyr::select(average_rating, num_pages, log_ratings_count, log_text_reviews) %>%
+  na.omit()
+
+if("publication_year" %in% names(bksmodel)) {
+  corvars <- bksmodel %>%
+    dplyr::select(average_rating, num_pages, publication_year, 
+           log_ratings_count, log_text_reviews) %>%
+    na.omit()
+}
+
+cormat <- cor(corvars)
+
+print(round(cormat, 3))
+
+library(reshape2)
+cormelt <- melt(cormat)
+
+# heatmap
+ggplot(cormelt, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), color = "white", size = 3) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Matrix", x = "", y = "")
+```
+
+---
+
+```{r fit-model}
+# fit linear regression
+cat("fitting model\n\n")
+
+mdl <- lm(average_rating ~ num_pages + pages_squared + 
+                   log_ratings_count + log_text_reviews + genre_category,
+                 data = bksmodel)
+
+cat("MODEL SUMMARY\n\n")
+summary(mdl)
+```
+
+---
+
+```{r model-stats}
+# model stats
+cat("sample size:", nrow(bksmodel), "\n")
+cat("r squared:", round(summary(mdl)$r.squared, 4), "\n")
+cat("adj r squared:", round(summary(mdl)$adj.r.squared, 4), "\n")
+cat("residual se:", round(summary(mdl)$sigma, 4), "\n")
+```
+
+---
+
+```{r vif-check}
+# check for multicollinearity
+cat("vif:\n")
+vifvals <- vif(mdl)
+print(round(vifvals, 2))
+
+if(any(vifvals > 10)) {
+  cat("\nhigh multicolinearity\n")
+} else if(any(vifvals > 5)) {
+  cat("\nmoderate multicolinearity\n")
+} else {
+  cat("\nvif ok\n")
+}
+```
+
+---
+
+```{r diagnostics, fig.width=10, fig.height=8}
+# diagnostic plots
+par(mfrow = c(2, 2))
+plot(mdl)
+par(mfrow = c(1, 1))
+```
+
+---
+
+```{r predictions}
+# get predictions and residuals
+bksmodel <- bksmodel %>%
+  mutate(
+    predicted_rating = predict(mdl, newdata = bksmodel),
+    residual = average_rating - predicted_rating
+  )
+
+rmse <- sqrt(mean(bksmodel$residual^2, na.rm = TRUE))
+mae <- mean(abs(bksmodel$residual), na.rm = TRUE)
+
+cat("rmse:", round(rmse, 4), "\n")
+cat("mae:", round(mae, 4), "\n")
+```
+
+---
+
+```{r actual-vs-predicted, fig.width=10, fig.height=8}
+# actual vs predicted scatter
+ggplot(bksmodel, aes(x = predicted_rating, y = average_rating)) +
+  geom_point(alpha = 0.3, color = "steelblue", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Actual vs Predicted Ratings",
+       subtitle = paste("RMSE =", round(rmse, 3), "| MAE =", round(mae, 3)),
+       x = "Predicted Rating", y = "Actual Rating") +
+  theme_minimal()
+```
+
+---
+
+```{r interpretation}
+# interperet coefficents
+coefsumm <- summary(mdl)$coefficients
+
+cat("KEY FINDINGS: \n\n")
+
+if("num_pages" %in% rownames(coefsumm)) {
+  pgcoef <- coefsumm["num_pages", "Estimate"]
+  pgsqcoef <- coefsumm["pages_squared", "Estimate"]
+  
+  cat("1. PAGE COUNT EFFECT:\n")
+  cat("   Linear term:", round(pgcoef, 6), "\n")
+  cat("   Quadratic term:", round(pgsqcoef, 9), "\n")
+  
+  if(pgsqcoef < 0) {
+    optpg <- -pgcoef / (2 * pgsqcoef)
+    cat("   → Optimal page count:", round(optpg, 0), "pages\n\n")
+  }
+}
+
+if("publication_year" %in% rownames(coefsumm)) {
+  yrcoef <- coefsumm["publication_year", "Estimate"]
+  cat("2. PUBLICATION YEAR EFFECT:\n")
+  cat("   Coefficient:", round(yrcoef, 6), "\n")
+  cat("   → Per year change:", round(yrcoef, 4), "\n\n")
+}
+
+if("log_ratings_count" %in% rownames(coefsumm)) {
+  logratcoef <- coefsumm["log_ratings_count", "Estimate"]
+  cat("3. REVIEW COUNT EFFECT:\n")
+  cat("   Coefficient:", round(logratcoef, 4), "\n\n")
+}
+```
+
+---
+
+```{r save-outputs}
+# save everything
+if(!dir.exists("outputs")) {
+  dir.create("outputs")
+}
+
+write.csv(bksmodel, "outputs/books_cleaned_for_analysis.csv", row.names = FALSE)
+cat("saved cleaned data\n")
+
+saveRDS(mdl, "outputs/regression_model.rds")
+cat("saved model\n")
+
+sink("outputs/model_summary.txt")
+cat("=== GOODREADS BOOK RATING PREDICTION MODEL ===\n\n")
+cat("Dataset size:", nrow(bksmodel), "books\n")
+cat("R-squared:", round(summary(mdl)$r.squared, 4), "\n")
+cat("RMSE:", round(rmse, 4), "\n\n")
+print(summary(mdl))
+cat("\n\n=== VIF ===\n")
+print(vifvals)
+sink()
+cat("saved summary\n")
+```
+
+---
+
+```{r final-summary}
+# final summary
+cat("\nanalysis done\n")
+cat("total books:", nrow(bksmodel), "\n")
+cat("r squared:", round(summary(mdl)$r.squared, 4), "\n")
+cat("rmse:", round(rmse, 4), "\n\n")
+cat("outputs:\n")
+cat("  books_cleaned_for_analysis.csv\n")
+cat("  regression_model.rds\n")
+cat("  model_summary.txt\n")
+```
