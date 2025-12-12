@@ -1,13 +1,77 @@
 ---
 title: "Bootstrap"
 format: html
+editor: 
+  markdown: 
+    wrap: sentence
 ---
 
 ```{r}
 library(tidyverse)
+library(boot)
 ```
 
 ```{r}
-books <- read.csv("outputs/")
+books <- read.csv("outputs\\books_cleaned_for_analysis.csv")
 ```
 
+Bootstrap methods provide robust inference for coefficient estimation and prediction.
+We will:
+
+1\.
+Draw at least 1,000 bootstrap samples with replacement.
+
+2\.
+Refit the regression model on each sample to obtain empirical coefficient distributions.
+
+3\.
+Construct percentile and BCa bootstrap confidence intervals.
+
+4\.
+Perform a residual bootstrap to generate predictive intervals for ratings.
+
+5\.
+Compute empirical p-values for hypotheses such as:
+
+```{r}
+mdl <- lm(average_rating ~ num_pages + pages_squared + 
+                   log_ratings_count + log_text_reviews + genre_category,
+                 data = books)
+summary(mdl)
+```
+
+```{r}
+hist(books$num_pages)
+hist(books$pages_squared)
+hist(books$log_ratings_count)
+hist(books$log_text_reviews)
+```
+
+```{r}
+set.seed(100)
+
+
+coef_function <- function(formula, data, indices) {
+  d <- data[indices,] #allows boot to select sample
+  fit <- lm(formula, data=d) #fit regression model
+  return(coef(fit)) #return coefficient estimates of model
+}
+
+
+bootstraps <- boot(data=books, statistic=coef_function, R=1000, formula=average_rating ~ num_pages + pages_squared + 
+                   log_ratings_count + log_text_reviews + genre_category)
+
+
+```
+
+```{r}
+#histogram of coefficients for the quantitative variables
+hist(bootstraps$data$num_pages)
+hist(bootstraps$data$pages_squared)
+hist(bootstraps$data$log_ratings_count)
+hist(bootstraps$data$log_text_reviews)
+```
+
+```{r}
+
+```
