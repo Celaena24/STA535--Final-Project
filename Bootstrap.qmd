@@ -1,0 +1,13 @@
+---
+title: "Bootstrap"
+format: html
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+books <- read.csv("outputs/")
+```
+
