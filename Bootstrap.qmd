@@ -9,6 +9,7 @@ editor:
 ```{r}
 library(tidyverse)
 library(boot)
+library(lmboot)
 ```
 
 ```{r}
@@ -65,13 +66,32 @@ bootstraps <- boot(data=books, statistic=coef_function, R=1000, formula=average_
 ```
 
 ```{r}
-#histogram of coefficients for the quantitative variables
+bootstraps
+```
+
+```{r}
+#histograms of bootstrap sample coefficients
 hist(bootstraps$data$num_pages)
 hist(bootstraps$data$pages_squared)
 hist(bootstraps$data$log_ratings_count)
 hist(bootstraps$data$log_text_reviews)
+
+
 ```
 
 ```{r}
+# residual bootstrap!
+
+resboot <- residual.boot(average_rating ~ num_pages + pages_squared + 
+                   log_ratings_count + log_text_reviews + genre_category, B = 1000, data = books, seed = 100)
+
+
+hist(resboot$bootEstParam[,2], main="Residual Bootstrap Sampling Distn.",
+     xlab="num_pages Slope Estimate") 
+
+hist(resboot$bootEstParam[,3], main="Residual Bootstrap Sampling Distn.",
+     xlab="pages_squared Slope Estimate")
+
+quantile(resboot$bootEstParam[,2], probs=c(.025, .975)) #num_pages
 
 ```
